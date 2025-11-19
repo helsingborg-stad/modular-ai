@@ -1,205 +1,126 @@
-#!/usr/bin/env php
+#!/bin/php
 <?php
-/**
- * Build script for Modular AI WordPress Plugin
- * 
- * Builds assets and optionally cleans up development files.
- * 
- * Usage:
- *   php build.php              - Build assets (no cleanup in dev environment)
- *   php build.php --cleanup    - Build assets and remove development files (explicit)
- * 
- * Note: Cleanup runs automatically when installed via Composer
- */
-
-// Only allow run from CLI
+// Only allow run from cli.
 if (php_sapi_name() !== 'cli') {
     exit(0);
 }
 
-$args = $argv ?? [];
-$explicitCleanup = in_array('--cleanup', $args, true);
+/* Parameters: 
+ --no-composer      Does not install vendors. Just create the autoloader.
+ --cleanup          Remove removeables. 
+ --allow-gulp       Allow gulp to be used. 
+*/
 
-// Detect if running from Composer (installed in vendor directory)
-$isComposerInstall = isComposerInstall();
-
-// Only cleanup when installed via Composer OR explicitly requested
-$cleanup = $isComposerInstall || $explicitCleanup;
-
-$pluginName = basename(dirname(__FILE__));
-$packageJson = __DIR__ . '/package.json';
-$packageLockJson = __DIR__ . '/package-lock.json';
-
-// Check if package.json exists
-if (!file_exists($packageJson)) {
-    echo "Skipping asset build - package.json not found\n";
-    exit(0);
-}
-
-// Check if Node.js is available
-$nodePath = trim(shell_exec('command -v node 2>/dev/null') ?: '');
-if (empty($nodePath)) {
-    echo "Warning: Node.js not found. Assets will not be built.\n";
-    echo "Please install Node.js and run: npm install && npm run build\n";
-    exit(0);
-}
-
-// Build commands
+// Any command needed to run and build plugin assets when newly cheched out of repo.
 $buildCommands = [];
 
-// Install npm dependencies
-if (file_exists($packageLockJson)) {
+//Add composer build, if flag --no-composer is undefined.
+//Dump autloader. 
+//Only if composer.json exists.
+if(file_exists('composer.json')) {
+    if(is_array($argv) && !in_array('--no-composer', $argv)) {
+        $buildCommands[] = 'composer install --prefer-dist --no-progress --no-dev'; 
+    }
+    $buildCommands[] = 'composer dump-autoload';
+}
+
+//Run npm if package.json is found
+if(file_exists('package.json') && file_exists('package-lock.json')) {
     $buildCommands[] = 'npm ci --no-progress --no-audit';
-} else {
+} elseif(file_exists('package.json') && !file_exists('package-lock.json')) {
     $buildCommands[] = 'npm install --no-progress --no-audit';
 }
 
-// Build assets
-$buildCommands[] = 'npm run build';
+//Run build if package-lock.json is found
+if(file_exists('package-lock.json') && !file_exists('gulp.js')) {
+    $buildCommands[] = 'npx --yes browserslist@latest --update-db';
+    $buildCommands[] = 'npm run build';
+} elseif(file_exists('package-lock.json') && file_exists('gulp.js') && is_array($argv) && in_array('--allow-gulp', $argv)) {
+    $buildCommands[] = 'gulp';
+}
 
-// Execute build commands
-foreach ($buildCommands as $command) {
-    $commandName = explode(' ', $command)[0];
-    echo "---- Running '$commandName' for $pluginName ----\n";
-    
+// Files and directories not suitable for prod to be removed.
+$removables = [
+    '.git',
+    '.gitignore',
+    '.github',
+    '.gitattributes',
+    'build.php',
+    '.npmrc',
+    'composer.json',
+    'composer.lock',
+    'env-example',
+    'webpack.config.js',
+    'package-lock.json',
+    'package.json',
+    'phpunit.xml.dist',
+    'README.md',
+    'gulpfile.js',
+    './node_modules/',
+    './source/sass/',
+    './source/js/',
+    'LICENSE',
+    'babel.config.js',
+    'yarn.lock'
+];
+
+$dirName = basename(dirname(__FILE__));
+
+// Run all build commands.
+$output = '';
+$exitCode = 0;
+foreach ($buildCommands as $buildCommand) {
+    print "---- Running build command '$buildCommand' for $dirName. ----\n";
     $timeStart = microtime(true);
-    $exitCode = executeCommand($command);
-    $buildTime = round(microtime(true) - $timeStart, 2);
-    
+    $exitCode = executeCommand($buildCommand);
+    $buildTime = round(microtime(true) - $timeStart);
+    print "---- Done build command '$buildCommand' for $dirName.  Build time: $buildTime seconds. ----\n";
     if ($exitCode > 0) {
-        echo "Error: Command '$command' failed with exit code $exitCode\n";
         exit($exitCode);
     }
-    
-    echo "---- Completed '$commandName' in {$buildTime}s ----\n\n";
 }
 
-echo "Assets built successfully!\n";
-
-// Cleanup development files if requested
-if ($cleanup) {
-    if ($isComposerInstall) {
-        echo "\n---- Cleaning up development files (Composer installation detected) ----\n";
-    } else {
-        echo "\n---- Cleaning up development files (explicit --cleanup flag) ----\n";
-    }
-    
-    $removables = [
-        '.git',
-        '.gitignore',
-        '.gitattributes',
-        'build.php',
-        '.npmrc',
-        'composer.json',
-        'composer.lock',
-        '.env.example',
-        'package-lock.json',
-        'package.json',
-        'vite.config.js',
-        'node_modules',
-        'translation-fix.js',
-    ];
-    
+// Remove files and directories if '--cleanup' argument is supplied to save local developers from disasters.
+if(is_array($argv) && in_array('--cleanup', $argv)) {
     foreach ($removables as $removable) {
-        $path = __DIR__ . '/' . $removable;
-        if (file_exists($path) || is_dir($path)) {
-            echo "Removing: $removable\n";
-            removePath($path);
+        if (file_exists($removable)) {
+            print "Removing $removable from $dirName\n";
+            shell_exec("rm -rf $removable");
         }
     }
-    
-    echo "Cleanup completed!\n";
 }
 
 /**
- * Detect if script is running from a Composer installation
- * 
- * Checks for:
- * - vendor/ directory (standard Composer)
- * - plugins/ directory (WordPress plugin installation)
- * - Absence of .git directory (indicates installed package, not dev repo)
- * 
- * @return bool True if installed via Composer
+ * Better shell script execution with live output to STDOUT and status code return.
+ * @param  string $command Command to execute in shell.
+ * @return int             Exit code.
  */
-function isComposerInstall(): bool
+function executeCommand($command)
 {
-    $scriptPath = __DIR__;
-    $realPath = realpath($scriptPath);
-    
-    // Check if path contains 'vendor/' which indicates standard Composer installation
-    if (strpos($scriptPath, '/vendor/') !== false || strpos($scriptPath, '\\vendor\\') !== false) {
-        return true;
-    }
-    
-    // Check if path contains 'plugins/' which indicates WordPress plugin installation
-    if (strpos($scriptPath, '/plugins/') !== false || strpos($scriptPath, '\\plugins\\') !== false ||
-        ($realPath && (strpos($realPath, '/plugins/') !== false || strpos($realPath, '\\plugins\\') !== false))) {
-        
-        // Additional check: if .git exists, it's likely the dev repo, not an install
-        $gitPath = __DIR__ . '/.git';
-        if (!is_dir($gitPath) && !file_exists($gitPath)) {
-            return true;
-        }
-    }
-    
-    return false;
-}
-
-/**
- * Execute a shell command with live output
- * 
- * @param string $command Command to execute
- * @return int Exit code
- */
-function executeCommand(string $command): int
-{
-    $isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
-    
-    if ($isWindows) {
+    $fullCommand = '';
+    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
         $fullCommand = "cmd /v:on /c \"$command 2>&1 & echo Exit status : !ErrorLevel!\"";
     } else {
         $fullCommand = "$command 2>&1 ; echo Exit status : $?";
     }
-    
-    $proc = popen($fullCommand, 'r');
-    if (!$proc) {
-        return 1;
-    }
-    
-    $completeOutput = '';
-    
-    while (!feof($proc)) {
-        $output = fread($proc, 4096);
-        if ($output !== false) {
-            echo $output;
-            $completeOutput .= $output;
-            @flush();
-        }
-    }
-    
-    pclose($proc);
-    
-    // Extract exit code from output
-    preg_match('/Exit status : (\d+)$/', $completeOutput, $matches);
-    
-    return isset($matches[1]) ? (int)$matches[1] : 0;
-}
 
-/**
- * Remove a file or directory recursively
- * 
- * @param string $path Path to remove
- * @return void
- */
-function removePath(string $path): void
-{
-    if (is_dir($path)) {
-        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-            shell_exec("rmdir /s /q " . escapeshellarg($path) . " 2>nul");
-        } else {
-            shell_exec("rm -rf " . escapeshellarg($path) . " 2>/dev/null");
-        }
-    } else {
-        @unlink($path);
+    $proc = popen($fullCommand, 'r');
+
+    $liveOutput     = '';
+    $completeOutput = '';
+
+    while (!feof($proc)) {
+        $liveOutput     = fread($proc, 4096);
+        $completeOutput = $completeOutput . $liveOutput;
+        print $liveOutput;
+        @ flush();
     }
+
+    pclose($proc);
+
+    // Get exit status.
+    preg_match('/[0-9]+$/', $completeOutput, $matches);
+
+    // Return exit status.
+    return intval($matches[0]);
 }
